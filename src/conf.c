@@ -96,9 +96,6 @@ source_config load_sources_config() {
 void free_sources_config(source_config config) {
     if (config.sources != NULL) {
         printf("Clean mem\n");
-        for (size_t i = 0; i < config.count; i++) {
-            free(config.sources[i].statuses);
-        }
         free(config.sources);
     }
 }

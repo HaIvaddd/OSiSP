@@ -9,32 +9,41 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <signal.h>
+
 
 #include "telemetry.h"
 #include "conf.h"
+#include "server_utils.h"
 
-#define PORT 8080
-
-#define BACKLOG_SIZE 10
-#define BUFFER_SIZE 1024
 #define INIT_FDS_CAPACITY 10
+#define BUFFER_SIZE 64
 
 pthread_mutex_t sources_mutex = PTHREAD_MUTEX_INITIALIZER;
 volatile bool server_running = true;
 
 
-
-int socket_create();
-void set_address(struct sockaddr_in *addr);
-void bind_socket(int listen_fd, struct sockaddr_in *addr);
-void listen_socket(int listen_fd);
-void client_error(nfds_t *nfds, nfds_t *current_nfds , nfds_t *i, struct pollfd **fds);
-void initialize_source(virtual_source *sources, size_t num_sources);
-int fds_realloc(struct pollfd **fds_ptr, size_t *fds_capacity_ptr);
 void* source_thread_function(void *arg);
+void signal_handler(int signum);
+void initialize_source(virtual_source *sources, size_t num_sources);
 
 int main() {
     
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sa.sa_flags = ERESTART;
+
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+
     virtual_source *sources = NULL;
     size_t source_count = 0;
     
@@ -115,8 +124,16 @@ int main() {
     while(server_running) {
         int poll_count = poll(fds, nfds, -1);
         if (poll_count < 0) {
-            perror("poll");
-            break;
+            if (errno == EINTR && !server_running) {
+                printf("Server interrupted by signal\n");
+                break;
+            } else if (errno == EINTR) {
+                continue; // Retry poll on interrupt
+            } else {
+                perror("poll");
+                server_running = false;
+                break;
+            }
         }
 
         nfds_t current_nfds = nfds;
@@ -184,6 +201,70 @@ int main() {
                 client_error(&nfds, &current_nfds, &i, &fds);
             }
         }
+
+        unsigned char send_buffer[BUFFER_SIZE];
+        nfds_t current_loop_nfds = nfds;
+        for (nfds_t j = 1; j < current_nfds; ++j) {
+            if (j >= nfds) {
+                break;
+            }
+
+            int client_fd = fds[j].fd;
+
+            if (client_fd < 0) {
+                continue;
+            }
+
+            for (size_t k = 0; k < source_count; ++k) {
+                telemetry_data data;
+
+                bool is_active = false;
+
+                //Crytical section
+                int ret = pthread_mutex_lock(&sources_mutex);
+                if (ret != 0) {
+                    fprintf(stderr, "Failed to lock mutex: %s\n", strerror(ret));
+                    continue;
+                }
+
+                if (sources[k].is_active) {
+                    data = sources[k].data;
+                    is_active = true;
+                }
+
+                ret = pthread_mutex_unlock(&sources_mutex);
+
+                if (ret != 0) {
+                    fprintf(stderr, "Failed to unlock mutex: %s\n", strerror(ret));
+                    continue;
+                }
+
+                if (!is_active) {
+                    continue;
+                }
+
+                ssize_t bytes_to_send = serialize_telemetry_data(&data, send_buffer, sizeof(send_buffer));
+                if (bytes_to_send <= 0) {
+                    fprintf(stderr, "Failed to serialize telemetry data\n");
+                    continue;
+                }
+     
+                ssize_t bytes_sent = send_all(client_fd, send_buffer, bytes_to_send);
+
+                if (bytes_sent < 0) {
+                    perror("Failed to send data to client\n");
+                    nfds_t client_index = j;
+                    client_error(&nfds, &current_loop_nfds, &client_index, &fds);
+                    j = client_index;
+                    break;
+                } else if ((size_t)bytes_sent < (size_t)bytes_to_send) {
+                    printf("Some part sending\n");
+                } else {
+                    printf("Sent %zd bytes to client\n", bytes_sent);
+                }
+            }
+        }
+
     }
     printf("Exiting...\n");
 
@@ -215,85 +296,6 @@ int main() {
     return 0;
 }
 
-int socket_create() {
-    int listen_fd;
-    int optval = 1;
-
-    if ((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
-
-    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
-        perror("setsockopt");
-        close(listen_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    return listen_fd;
-}
-
-void set_address(struct sockaddr_in *addr) {
-    memset(addr, 0, sizeof(*addr));
-    addr->sin_family = AF_INET;
-    addr->sin_addr.s_addr = INADDR_ANY;
-    addr->sin_port = htons(PORT);
-}
-
-void bind_socket(int listen_fd, struct sockaddr_in *addr) {
-    if (bind(listen_fd, (struct sockaddr *)addr, sizeof(*addr)) < 0) {
-        perror("bind");
-        close(listen_fd);
-        exit(EXIT_FAILURE);
-    }
-}
-
-void listen_socket(int listen_fd) {
-    if (listen(listen_fd, BACKLOG_SIZE) < 0) {
-        perror("listen");
-        close(listen_fd);
-        exit(EXIT_FAILURE);
-    }
-} 
- 
-int fds_realloc(struct pollfd **fds_ptr, size_t *fds_capacity_ptr) {
-    int old_capacity = *fds_capacity_ptr;
-    int new_capacity = old_capacity * 2;
-
-    struct pollfd *temp_fds = realloc(*fds_ptr, sizeof(struct pollfd) * new_capacity);
-
-    if (temp_fds == NULL) {
-        perror("realloc");
-        return -1;
-    } else {
-        *fds_ptr = temp_fds;
-        *fds_capacity_ptr = new_capacity;
-        return 0;
-    }
-}
-
-void client_error(nfds_t *nfds, nfds_t *current_nfds , nfds_t *i, struct pollfd **fds) {
-
-    close((*fds)[*i].fd);
-    
-    (*fds)[*i] = (*fds)[*nfds - 1];
-    (*nfds) --;
-
-    if (*i < *nfds) {
-        (*i)--;
-        (*current_nfds)--;
-    }
-}
-
-void initialize_source(virtual_source *sources, size_t num_sources) {
-    pthread_mutex_lock(&sources_mutex);
-    for (size_t i = 0; i < num_sources; ++i) {
-        update_source_reading(&sources[i]);
-    }
-    pthread_mutex_unlock(&sources_mutex);
-    printf("Начальные показания инициализированы.\n");
-}
-
 void* source_thread_function(void *arg) {
     if (arg == NULL) {
         fprintf(stderr, "NULL argument passed to source thread function\n");
@@ -312,7 +314,7 @@ void* source_thread_function(void *arg) {
         int ret = nanosleep(&sleep_req, &sleep_rem);
         while (ret == -1 && errno == EINTR) {
             sleep_req = sleep_rem;
-            ret = nanosleep(&sleep_rem, &sleep_rem);
+            ret = nanosleep(&sleep_req, &sleep_rem);
         }
         if (ret == -1 && errno != EINTR) {
             perror("nanosleep");
@@ -334,7 +336,7 @@ void* source_thread_function(void *arg) {
         } 
 
         ret = pthread_mutex_unlock(&sources_mutex);
-        
+
         if (ret != 0) {
             fprintf(stderr, "Failed to unlock mutex: %s\n", strerror(ret));
             break;
@@ -344,3 +346,15 @@ void* source_thread_function(void *arg) {
     pthread_exit(NULL);
 }
 
+void signal_handler(int signum) {
+    server_running = false;
+}
+
+void initialize_source(virtual_source *sources, size_t num_sources) {
+    pthread_mutex_lock(&sources_mutex);
+    for (size_t i = 0; i < num_sources; ++i) {
+        update_source_reading(&sources[i]);
+    }
+    pthread_mutex_unlock(&sources_mutex);
+    printf("Начальные показания инициализированы.\n");
+}
