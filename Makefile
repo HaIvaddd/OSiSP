@@ -1,25 +1,48 @@
+#makefile
 CC = gcc
+CFLAGS = -std=c11 -g2 -ggdb -pedantic -W -Wall -Wextra
 
-CFLAGS = -Wall -Wextra -pedantic -std=c11
+.PHONY: clean
+.PHONY: valgrind
+.PHONY: start
 
-TARGET = hello
-SRCS = hello.c
-OBJS = $(SRCS:.c=.o)
+.SUFFIXES:
+.SUFFIXES: .c .o
 
-all: $(TARGET)
+DEBUG   = ./build/debug
+RELEASE = ./build/release
+OUT_DIR = $(DEBUG)
+vpath %.c src
+vpath %.h src
+vpath %.o build/debug
 
-$(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS)
-	
-%.o : %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+ifeq ($(MODE), release)
+  CFLAGS = -std=c11 -pedantic -W -Wall -Wextra -Werror
+  OUT_DIR = $(RELEASE)
+  vpath %.o build/release
+endif
+
+
+objects =  $(OUT_DIR)/hello.o
+
+prog = $(OUT_DIR)/hello
+
+all: $(prog)
+
+$(prog) : $(objects)
+	$(CC) $(CFLAGS) $(objects) -o $@
+
+$(OUT_DIR)/%.o : %.c
+	$(CC) -c $(CFLAGS) $^ -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	@rm -rf $(DEBUG)/* $(RELEASE)/* hello
 
 run: all
-	./$(TARGET)
-	@echo "Execution finished."
+	./$(OUT_DIR)/hello
 
-.PHONY: all clean run
+valgrind:
+	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(OUT_DIR)/hello
 
+start:
+	./$(OUT_DIR)/hello
