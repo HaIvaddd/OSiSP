@@ -1,11 +1,13 @@
 #include "telemetry.h"
+#include "endian_utils.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
-#include <linux/time.h>
+#include <stdint.h>
+#include <arpa/inet.h>
 
 
 long long get_current_time_ms() {
@@ -45,7 +47,7 @@ gps_data generate_gps(virtual_source *source) {
 }
 
 const char *generate_status(virtual_source *source) {
-    if (source->num_statuses <= 0 || source->statuses == NULL) {
+    if (source->num_statuses <= 0) {
         return "NO_STATUSES_CONFIGURED"; // Возвращаем строку-ошибку
     }
     int status_index = rand() % source->num_statuses;
@@ -106,4 +108,98 @@ void update_source_reading(virtual_source *source) {
             memset(&(source->data.value), 0, sizeof(telemetry_value));
            break;
    }
+}
+
+ssize_t serialize_telemetry_data(const telemetry_data *data, unsigned char *buffer, size_t buffer_size) {
+    if (data == NULL || buffer == NULL) {
+        fprintf(stderr, "serialize_telemetry: NULL pointer passed.\n");
+        return -1;
+    }
+
+    size_t required_size = 0;
+    size_t offset = 0; 
+
+    required_size = 1 + sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint64_t);
+
+    switch (data->type) {
+        case DATA_TYPE_TEMPERATURE:
+        case DATA_TYPE_PRESSURE:
+        case DATA_TYPE_HUMIDITY:
+            required_size += sizeof(uint32_t);
+            break;
+        case DATA_TYPE_GPS:
+            required_size += 2 * sizeof(uint64_t); 
+            break;
+        case DATA_TYPE_STATUS:
+            required_size += sizeof(data->value.status); 
+            break;
+        default:
+            fprintf(stderr, "serialize_telemetry: Unknown data type %d for source %d\n",
+                    data->type, data->id);
+            return -1;
+    }
+
+    if (buffer_size < required_size) {
+         fprintf(stderr, "serialize_telemetry: Buffer too small. Required: %zu, Available: %zu\n",
+                 required_size, buffer_size);
+        return -1;
+    }
+
+    buffer[offset] = 'T';
+    offset += sizeof(char);
+
+    uint32_t net_id = htonl((uint32_t)data->id);
+    memcpy(buffer + offset, &net_id, sizeof(net_id));
+    offset += sizeof(net_id);
+
+    uint8_t type_byte = (uint8_t)data->type;
+    buffer[offset] = type_byte;
+    offset += sizeof(type_byte);
+
+    uint64_t net_timestamp = htonll((uint64_t)data->timestamp_ms);
+    memcpy(buffer + offset, &net_timestamp, sizeof(net_timestamp));
+    offset += sizeof(net_timestamp);
+
+    switch (data->type) {
+        case DATA_TYPE_TEMPERATURE: {
+            uint32_t net_float = htonf(data->value.temperature);
+            memcpy(buffer + offset, &net_float, sizeof(net_float));
+            offset += sizeof(net_float);
+            break;
+        }
+        case DATA_TYPE_PRESSURE: {
+             uint32_t net_float = htonf(data->value.pressure);
+             memcpy(buffer + offset, &net_float, sizeof(net_float));
+             offset += sizeof(net_float);
+             break;
+        }
+        case DATA_TYPE_HUMIDITY: {
+             uint32_t net_float = htonf(data->value.humidity);
+             memcpy(buffer + offset, &net_float, sizeof(net_float));
+             offset += sizeof(net_float);
+             break;
+        }
+        case DATA_TYPE_GPS: {
+            uint64_t net_lat = htond(data->value.gps.latitude);
+            uint64_t net_lon = htond(data->value.gps.longitude);
+            memcpy(buffer + offset, &net_lat, sizeof(net_lat));
+            offset += sizeof(net_lat);
+            memcpy(buffer + offset, &net_lon, sizeof(net_lon));
+            offset += sizeof(net_lon);
+            break;
+        }
+        case DATA_TYPE_STATUS: {
+            memcpy(buffer + offset, data->value.status, sizeof(data->value.status));
+            offset += sizeof(data->value.status);
+            break;
+        }
+    }
+
+    if (offset != required_size) {
+         fprintf(stderr, "serialize_telemetry: Internal error - offset (%zu) != required_size (%zu)\n",
+                 offset, required_size);
+         return -1;
+    }
+
+    return (ssize_t)offset;
 }

@@ -3,6 +3,8 @@
 
 #include <time.h>
 #include <stdbool.h>
+#include <unistd.h>
+
 
 typedef enum {
     DATA_TYPE_TEMPERATURE,
@@ -44,7 +46,7 @@ typedef struct virtual_source {
     int update_interval_ms;
     gps_data gps;
     double max_gps_change;
-    char *statuses[5];
+    const char *statuses[5];
     int num_statuses;
     telemetry_data data;
 } virtual_source;
@@ -57,5 +59,7 @@ float generate_humidity(virtual_source *source);
 gps_data generate_gps(virtual_source *source);
 const char *generate_status(virtual_source *source);
 void update_source_reading(virtual_source *source);
+
+ssize_t serialize_telemetry_data(const telemetry_data *data, unsigned char *buffer, size_t buffer_size);
 
 #endif // TELEMETRY_H

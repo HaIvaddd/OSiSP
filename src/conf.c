@@ -73,7 +73,7 @@ static void init_humidity_sensor(virtual_source *s, int id, int interval) {
 }
 
 source_config load_sources_config() {
-    size_t num_sources_to_create = 5; 
+    size_t num_sources_to_create = 6; 
     printf("Load conf");
 
     virtual_source *sources_array = malloc(num_sources_to_create * sizeof(virtual_source));
@@ -95,7 +95,7 @@ source_config load_sources_config() {
 
 void free_sources_config(source_config config) {
     if (config.sources != NULL) {
-        printf("Clean mem\n", config.count);
+        printf("Clean mem\n");
         for (size_t i = 0; i < config.count; i++) {
             free(config.sources[i].statuses);
         }

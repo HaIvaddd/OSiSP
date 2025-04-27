@@ -30,8 +30,8 @@ void bind_socket(int listen_fd, struct sockaddr_in *addr);
 void listen_socket(int listen_fd);
 void client_error(nfds_t *nfds, nfds_t *current_nfds , nfds_t *i, struct pollfd **fds);
 void initialize_source(virtual_source *sources, size_t num_sources);
-
 int fds_realloc(struct pollfd **fds_ptr, size_t *fds_capacity_ptr);
+void* source_thread_function(void *arg);
 
 int main() {
     
@@ -40,7 +40,7 @@ int main() {
     
     pthread_t *source_threads = NULL;
  
-    int listen_fd, connect_fd;
+    int listen_fd = -1, connect_fd = -1;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
     char client_ip[INET_ADDRSTRLEN];
@@ -70,6 +70,7 @@ int main() {
     size_t fds_capacity = INIT_FDS_CAPACITY;
 
     fds = malloc(fds_capacity * sizeof(struct pollfd));
+    printf("Allocated memory for fds\n");
     if (fds == NULL) {
         perror("malloc");
         close(listen_fd);
@@ -79,6 +80,37 @@ int main() {
     fds[0].fd = listen_fd;
     fds[0].events = POLLIN;
     nfds = 1;
+
+    source_threads = malloc(source_count * sizeof(pthread_t));
+    if (source_threads == NULL) {
+        perror("malloc");
+        free(fds);
+        free_sources_config(config);
+        if (listen_fd >= 0) {
+            close(listen_fd);
+        }
+        pthread_mutex_destroy(&sources_mutex);
+        exit(EXIT_FAILURE);
+    }
+
+    for (size_t i = 0; i < source_count; ++i) {
+        int ret = pthread_create(&source_threads[i], NULL, source_thread_function, (void *)&sources[i]);
+        if (ret != 0) {
+            server_running = false;
+            for (size_t j = 0; j < i; ++j) {
+                pthread_join(source_threads[j], NULL);
+            }
+            fprintf(stderr, "Failed to create thread for source %d: %s\n", sources[i].id, strerror(ret));
+            free(source_threads);
+            free(fds);
+            free_sources_config(config);
+            if (listen_fd >= 0) {
+                close(listen_fd);
+            }
+            pthread_mutex_destroy(&sources_mutex);
+            exit(EXIT_FAILURE);
+        }
+    }
 
     while(server_running) {
         int poll_count = poll(fds, nfds, -1);
@@ -155,12 +187,29 @@ int main() {
     }
     printf("Exiting...\n");
 
-    for (nfds_t i = 0; i < nfds; i++) {
+    if (source_threads != NULL) {
+        for (size_t i = 0; i < source_count; ++i) {
+            int ret = pthread_join(source_threads[i], NULL);
+            if (ret != 0) {
+                fprintf(stderr, "Failed to join thread for source %d: %s\n", sources[i].id, strerror(ret));
+            } else {
+                printf("Thread for source %d joined successfully\n", sources[i].id);
+            }
+        }
+        free(source_threads);
+        source_threads = NULL;
+    }
+
+    for (nfds_t i = 1; i < nfds; i++) {
         close(fds[i].fd);
     }
     free(fds);
-    close(listen_fd);
+    
+    if (listen_fd >= 0) {
+        close(listen_fd);
+    }
 
+    free_sources_config(config);
     pthread_mutex_destroy(&sources_mutex);
 
     return 0;
@@ -239,8 +288,59 @@ void client_error(nfds_t *nfds, nfds_t *current_nfds , nfds_t *i, struct pollfd 
 void initialize_source(virtual_source *sources, size_t num_sources) {
     pthread_mutex_lock(&sources_mutex);
     for (size_t i = 0; i < num_sources; ++i) {
-         update_source_reading(&sources[i]);
+        update_source_reading(&sources[i]);
     }
     pthread_mutex_unlock(&sources_mutex);
     printf("Начальные показания инициализированы.\n");
 }
+
+void* source_thread_function(void *arg) {
+    if (arg == NULL) {
+        fprintf(stderr, "NULL argument passed to source thread function\n");
+        pthread_exit((void *)-1);
+    }
+
+    virtual_source *source = (virtual_source *)arg;
+    printf("Thread for ID %d: start.\n", source->id);
+
+    struct timespec sleep_req;
+    struct timespec sleep_rem;
+    sleep_req.tv_sec = source->update_interval_ms / 1000;
+    sleep_req.tv_nsec = (source->update_interval_ms % 1000) * 1000000;
+
+    while (server_running) {
+        int ret = nanosleep(&sleep_req, &sleep_rem);
+        while (ret == -1 && errno == EINTR) {
+            sleep_req = sleep_rem;
+            ret = nanosleep(&sleep_rem, &sleep_rem);
+        }
+        if (ret == -1 && errno != EINTR) {
+            perror("nanosleep");
+            break;
+        }
+        if (!server_running) {
+            break;
+        }
+        
+        ret = pthread_mutex_lock(&sources_mutex);
+
+        if (ret != 0) {
+            fprintf(stderr, "Failed to lock mutex: %s\n", strerror(ret));
+            break;
+        }
+
+        if (source->is_active) {
+            update_source_reading(source);
+        } 
+
+        ret = pthread_mutex_unlock(&sources_mutex);
+        
+        if (ret != 0) {
+            fprintf(stderr, "Failed to unlock mutex: %s\n", strerror(ret));
+            break;
+        }
+    }
+
+    pthread_exit(NULL);
+}
+
