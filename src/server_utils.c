@@ -72,6 +72,9 @@ void client_error(nfds_t *nfds, nfds_t *i, struct pollfd **fds) {
     close((*fds)[*i].fd);
     
     (*fds)[*i] = (*fds)[*nfds - 1];
+    (*fds)[*nfds - 1].fd = -1;
+    (*fds)[*nfds - 1].events = 0;
+    (*fds)[*nfds - 1].revents = 0;
     (*nfds) --;
     (*i)--;
 }

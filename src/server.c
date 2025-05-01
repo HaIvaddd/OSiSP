@@ -82,6 +82,11 @@ int main() {
     size_t fds_capacity = INIT_FDS_CAPACITY;
 
     fds = malloc(fds_capacity * sizeof(struct pollfd));
+    for (size_t i = 0; i < fds_capacity; ++i) {
+        fds[i].fd = -1;
+        fds[i].events = 0;
+        fds[i].revents = 0;
+    }
     printf("Allocated memory for fds\n");
     if (fds == NULL) {
         perror("malloc");
@@ -167,7 +172,7 @@ int main() {
                     
 
                     fds[nfds].fd = connect_fd;
-                    fds[nfds].events = POLLIN | POLLOUT; 
+                    fds[nfds].events = POLLOUT | POLLIN; 
                     nfds++;
                     printf("Клиент fd=%d добавлен. Всего дескрипторов: %lu\n", connect_fd, nfds);
 
@@ -180,18 +185,18 @@ int main() {
 
                 if (fds[i].revents & POLLIN) {
 
-                    char dummy_buffer[1];
-                    printf("Client recv\n");
-                    ssize_t bytes_received = recv(client_fd, dummy_buffer, sizeof(dummy_buffer), 0);
-                    printf("Client not work\n");
+                    char dummy_buffer;
+                    printf("Client recv fds %d\n", fds[i].fd);
+                    ssize_t bytes_received = recv(client_fd, &dummy_buffer, 1, 0);
                     if (bytes_received == 0) {
                         client_error(&nfds, &i, &fds);
-                        //printf("Клиент fd=%d отключился. Всего дескрипторов: %lu\n", client_fd, nfds);
+                        printf("Клиент fd=%d отключился. Всего дескрипторов: %lu\n", client_fd, nfds);
                     } else if (bytes_received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
                         perror("recv error on client socket");
                         client_error(&nfds, &i, &fds);
                     } else {
                         printf("Received data %zu bytes from client fd %d\n", bytes_received, client_fd);
+                        fds[i].revents = POLLOUT;
                     }
 
                 } else if (fds[i].revents & POLLOUT) {
@@ -202,9 +207,7 @@ int main() {
                 }
             }
         }
-        printf("Client working");
         if (last_send_time.tv_sec - current_time.tv_sec >= 1) {
-            printf("Client working working");
             clock_gettime(CLOCK_MONOTONIC, &current_time);
 
             unsigned char send_buffer[BUFFER_SIZE]; 
