@@ -67,17 +67,13 @@ int fds_realloc(struct pollfd **fds_ptr, size_t *fds_capacity_ptr) {
     }
 }
 
-void client_error(nfds_t *nfds, nfds_t *current_nfds , nfds_t *i, struct pollfd **fds) {
+void client_error(nfds_t *nfds, nfds_t *i, struct pollfd **fds) {
 
     close((*fds)[*i].fd);
     
     (*fds)[*i] = (*fds)[*nfds - 1];
     (*nfds) --;
-
-    if (*i < *nfds) {
-        (*i)--;
-        (*current_nfds)--;
-    }
+    (*i)--;
 }
 
 ssize_t send_all(int sockfd, const unsigned char *buf, size_t len) {
